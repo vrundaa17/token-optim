@@ -1,0 +1,11 @@
+.env
+venv/
+__pycache__/
+*.pyc
+memory.db
+chroma_db/
+.DS_Store
+free.py
+me.py
+extract.py
+static/
