@@ -52,7 +52,7 @@ def test_cache_miss_then_hit():
     query = "What's the capital of France?"
     answer = "Paris"
 
-    result, score = check_cache(query)
+    result, _ = check_cache(query)
     assert result is None  
 
     store_answer(query, answer)

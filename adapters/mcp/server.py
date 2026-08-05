@@ -16,55 +16,69 @@ from core.tool import select_relevant_tools
 app = Server("tokennnnn")
 _cached_tools=None
 
+FILESYSTEM_SERVER_PARAMS = StdioServerParameters(
+    command="npx",
+    args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+)
+
 async def get_tools():
     global _cached_tools
-    
-    async def find_file_tools():
-        server_params = StdioServerParameters(
-            command='npx',
-            args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-        )
-        async with stdio_client(server_params) as (read, write):
+    if _cached_tools is None:
+        async with stdio_client(FILESYSTEM_SERVER_PARAMS) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools_result = await session.list_tools()
-                return tools_result.tools
-
-    if _cached_tools is None:
-        _cached_tools = await find_file_tools()
+                _cached_tools = tools_result.tools
     return _cached_tools
 
 
 SEARCH_TOOL = Tool(
     name="search_tools",
-    description="Search for available tools relevant to a task. Call this first before attempting any file operation.",
+    description="Searches a catalog of file-related tools (read, write, list, search) and executes the best match for a given task and target path.",
     inputSchema={
         "type": "object",
-        "properties": {"query": {"type": "string", "description": "What you're trying to do"}},
+        "properties": {
+            "query": {"type": "string", "description": "What you're trying to do, e.g. 'read a file'"},
+            "path": {"type": "string", "description": "The file or directory path involved, if any"},
+        },
         "required": ["query"],
     },
 )
 
+_currently_relevant_tools = []
+_currently_relevant_tools = []
+
 @app.list_tools()
 async def list_tools():
-    print(f"[SERVER] returning only search_tools", file=sys.stderr)
+    if _currently_relevant_tools:
+        print(f"[SERVER] returning narrowed set: {[t.name for t in _currently_relevant_tools]}", file=sys.stderr)
+        return [SEARCH_TOOL] + _currently_relevant_tools
+    print(f"[SERVER] returning only search_tools (no active search yet)", file=sys.stderr)
     return [SEARCH_TOOL]
 
-
 @app.call_tool()
-async def call_tool(name,arguments):
-    if name=="search_tools":
+async def call_tool(name, arguments):
+    if name == "search_tools":
         all_tools = await get_tools()
         query = arguments["query"]
-        tool_dicts = [
-            {"function": {"name":t.name, "description":t.description}}
-            for t in all_tools
-        ]
-        relevant = select_relevant_tools(tool_dicts, query, top_k=3)
-        print(f"[SERVER] search_tools('{query}') | selected: {[t['function']['name'] for t in relevant]} | {len(all_tools)}", file=sys.stderr)
-    
+        tool_dicts = [{"function": {"name": t.name, "description": t.description}} for t in all_tools]
+        relevant = select_relevant_tools(tool_dicts, query, top_k=1)
+        if not relevant:
+            return [TextContent(type="text", text="No relevant tool found for this request.")]
+
+        best_tool_name = relevant[0]["function"]["name"]
+        print(f"[SERVER] search_tools('{query}') → auto-executing: {best_tool_name}", file=sys.stderr)
+
+        real_args = {k: v for k, v in arguments.items() if k != "query"}
+
+        server_params = StdioServerParameters(command="npx", args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"])
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(best_tool_name, real_args)
+                return result.content
+
     print(f"[Server] {name} with {arguments}", file=sys.stderr)
-    
     server_params = StdioServerParameters(command="npx", args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"])
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -80,7 +94,7 @@ async def main():
                 server_name="tokennnnn",
                 server_version="0.1",
                 capabilities=app.get_capabilities(
-                    notification_options=NotificationOptions(),   
+                    notification_options=NotificationOptions(tools_changed=True),   
                     experimental_capabilities={},
             )
         ))
