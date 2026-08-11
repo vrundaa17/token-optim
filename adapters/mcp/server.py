@@ -12,9 +12,9 @@ from fastmcp import FastMCP
 from core.trim import trim_text_response
 from core.tool_selection import select_relevant_tools
 from core.cache import check_cache, store_answer
-from core.audit import count_tokens
+# from core.audit import count_tokens
 from core.document_search import search_doc, index_doc, search_all_doc,index_folder  as _index_folder
-from core.db import get_connection, insert_audit_log
+# from adapters.extenstion.db import get_connection, insert_audit_log
 
 # logging.basicConfig(level=logging.INFO, stream=sys.stderr,
 #     format="%(asctime)s [%(levelname)s] %(message)s")
@@ -33,7 +33,7 @@ logger = logging.getLogger("token")
 _cached_tools = None
 _tool_server_map: dict[str, StdioServerParameters] = {}
 _tool_schema_map: dict[str,dict]={}
-_db_conn = get_connection()
+# _db_conn = get_connection()
 _session_run_id = "live_it_is"
 ALLOWED_DIR = os.getenv("ALLOWED_DIR", "/tmp")
 
@@ -49,11 +49,11 @@ DOWNSTREAM_SERVERS = [
 ]
 
 
-def _audit(stage, message, prompt_text, completion_text=""):
-    prompt_tokens = count_tokens(prompt_text)
-    completion_tokens = count_tokens(completion_text) if completion_text else 0
-    insert_audit_log(_db_conn, _session_run_id, stage, prompt_tokens, completion_tokens, message=message)
-    return prompt_tokens, completion_tokens
+# def #_audit(stage, message, prompt_text, completion_text=""):
+#     prompt_tokens = count_tokens(prompt_text)
+#     completion_tokens = count_tokens(completion_text) if completion_text else 0
+#     insert#_audit_log(_db_conn, _session_run_id, stage, prompt_tokens, completion_tokens, message=message)
+#     return prompt_tokens, completion_tokens
 
 
 async def discover_tools_from_server(server_params: StdioServerParameters) -> list:
@@ -153,7 +153,7 @@ async def find_tool(query: str, path: str = "") -> str:
 
     cached, score = check_cache(query)
     if cached:
-        _audit("cache_hit", query, query, cached)
+        #_audit("cache_hit", query, query, cached)
         logger.info(f"CACHE HIT | sim={score:.3f}")
         return cached
 
@@ -177,7 +177,7 @@ async def find_tool(query: str, path: str = "") -> str:
         if original_tokens != final_tokens:
             logger.info(f"[TRIMMED] | {original_tokens} | {final_tokens} tokens | saved {original_tokens - final_tokens}")
 
-        _audit("tool_execution", query, query, answer)
+        #_audit("tool_execution", query, query, answer)
         if answer:
             store_answer(query, answer)
         return answer
@@ -191,7 +191,7 @@ async def find_tool(query: str, path: str = "") -> str:
 async def index_document(file_path: str, doc_id: str) -> str:
     chunks = index_doc(file_path, doc_id)
     message = f"Indexed {doc_id} | {chunks} chunks stored."
-    _audit("index_document", doc_id, file_path, message)
+    #_audit("index_document", doc_id, file_path, message)
     return message
 
 
@@ -200,12 +200,12 @@ async def ask_document(query: str, doc_id: str, top_k: int = 3) -> str:
     cache_key = f"{doc_id}:{query}"
     cached, _ = check_cache(cache_key)
     if cached:
-        _audit("rag_cache_hit", query,cache_key, cached)
+        #_audit("rag_cache_hit", query,cache_key, cached)
         return cached
 
     results = search_doc(query, doc_id, top_k)
     answer = "\n\n".join([f"[Page {r.get('page', '?')}]\n{r['text']}" for r in results])
-    _audit("rag_search", query, query, answer)
+    #_audit("rag_search", query, query, answer)
     store_answer(cache_key, answer)
     return answer
 
@@ -216,7 +216,7 @@ async def search_all_documents(query: str, top_k: int = 3) -> str:
     cache_key = f"all:{query}"
     cached, score = check_cache(cache_key)
     if cached:
-        _audit("rag_cache_hit", query, cache_key, cached)
+        #_audit("rag_cache_hit", query, cache_key, cached)
         return cached
     
     results = search_all_doc(query, top_k)
@@ -228,7 +228,7 @@ async def search_all_documents(query: str, top_k: int = 3) -> str:
         for r in results
     ])
     
-    _audit("rag_search_all",query,query,answer)
+    #_audit("rag_search_all",query,query,answer)
     store_answer(cache_key,answer)
     return answer
 
@@ -243,7 +243,7 @@ async def index_documents_folder(folder_path: str) -> str:
         
         summary = "\n".join([f"  {doc_id}: {chunks} chunks" for doc_id, chunks in results.items()])
         message = f"Indexed {len(results)} documents from {folder_path}:\n{summary}"
-        _audit("index_folder", folder_path, folder_path, message)
+        #_audit("index_folder", folder_path, folder_path, message)
         return message
     except Exception as e:
         return f"Error: {str(e)}"

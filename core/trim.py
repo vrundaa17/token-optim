@@ -1,4 +1,9 @@
-from core.audit import count_tokens
+import tiktoken
+
+_encoder = tiktoken.get_encoding("cl100k_base")
+
+def count_tokens(text):
+    return len(_encoder.encode(str(text)))
 
 MAX_RESPONSE_TOKENS = 500
 def trim_text_response(text: str, max_tokens: int = MAX_RESPONSE_TOKENS) -> tuple[str, int, int]:

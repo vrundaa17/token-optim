@@ -15,3 +15,4 @@ extenstion/
 .env.*
 .vscode/
 .idea/
+tests/
