@@ -1,4 +1,4 @@
-from core.tool import select_relevant_tools
+from core.tool_selection import select_relevant_tools
 from core.cache import check_cache, store_answer
 from core.trim import trim_response
 import pytest
@@ -60,3 +60,26 @@ def test_cache_miss_then_hit():
     result2, score2 = check_cache("What is France's capital city?")
     assert result2 == answer
     assert score2 > 0.85
+    
+    
+import fitz, pymupdf
+from core.document_search import index_doc, search_doc
+
+def _make_test_pdf(path, text):
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), text)
+    doc.save(path)
+    doc.close()
+
+def test_index_and_search_pdf(tmp_path):
+
+    pdf_path = str(tmp_path / "test.pdf")
+    _make_test_pdf(pdf_path, "The refund window is 45 days for premium members.")
+
+    num_chunks = index_doc(pdf_path,"test_pdf_1")
+    assert num_chunks >= 1
+
+    results = search_doc("what is the refund window", doc_id="test_pdf_1", top_k=3)
+    assert "45 days" in results[0]["text"]
+    assert results[0]["page"] == 1

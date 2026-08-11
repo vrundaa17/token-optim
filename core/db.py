@@ -1,6 +1,7 @@
-import sqlite3
-from config import settings
-DB_PATH = settings.db_path
+import sqlite3,os
+from config import settings,PROJECT_ROOT
+DB_PATH = os.path.join(PROJECT_ROOT, settings.db_path)
+
 
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
@@ -29,15 +30,15 @@ def insert_audit_log(conn,run_id,stage,prompt_tokens,completion_tokens, message=
     return total
 
 
-def get_summary(conn,run_id=None):
+def get_summary(conn, run_id =None):
     if run_id:
         cursor = conn.execute(
             """SELECT stage, SUM(total_tokens), AVG(total_tokens), 
-            COUNT(*) FROM audit_log where run_id= ? GROUP BY stage""",(run_id)
+            COUNT(*) FROM audit_log where run_id= ? GROUP BY stage""", (run_id,)
         )
     else:
         cursor = conn.execute(
             """SELECT stage, SUM(total_tokens), AVG(total_tokens), 
-            COUNT(*) FROM audit_log GROUP BY stage""",(run_id)
+            COUNT(*) FROM audit_log GROUP BY stage"""
         )
     return cursor.fetchall()

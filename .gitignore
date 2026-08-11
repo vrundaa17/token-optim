@@ -6,3 +6,12 @@ memory.db
 chroma_db/
 .DS_Store
 storage/
+server.log
+server_http.py
+extenstion/
+*.py[cod]
+.pytest_cache/
+.env
+.env.*
+.vscode/
+.idea/

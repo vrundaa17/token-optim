@@ -1,112 +1,290 @@
-import sys,os
+import sys, os
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, project_root)
-import asyncio
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp.server.models import InitializationOptions
-from mcp.server import NotificationOptions 
-from mcp.types import Tool, TextContent
 
+import asyncio
+import logging
+from contextlib import asynccontextmanager
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from core.tool import select_relevant_tools
+from fastmcp import FastMCP
 
+from core.trim import trim_text_response
+from core.tool_selection import select_relevant_tools
+from core.cache import check_cache, store_answer
+from core.audit import count_tokens
+from core.document_search import search_doc, index_doc, search_all_doc,index_folder  as _index_folder
+from core.db import get_connection, insert_audit_log
 
-app = Server("tokennnnn")
-_cached_tools=None
+# logging.basicConfig(level=logging.INFO, stream=sys.stderr,
+#     format="%(asctime)s [%(levelname)s] %(message)s")
 
-FILESYSTEM_SERVER_PARAMS = StdioServerParameters(
-    command="npx",
-    args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=[
+        logging.FileHandler("/Users/prashant/Desktop/fxis/tom/server.log"),
+        logging.StreamHandler(sys.stderr)
+    ],
+    format="%(asctime)s [%(levelname)s] %(message)s"
 )
-
-async def get_tools():
-    global _cached_tools
-    if _cached_tools is None:
-        async with stdio_client(FILESYSTEM_SERVER_PARAMS) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                tools_result = await session.list_tools()
-                _cached_tools = tools_result.tools
-    return _cached_tools
+logger = logging.getLogger("token")
 
 
-SEARCH_TOOL = Tool(
-    name="search_tools",
-    description="Searches a catalog of file-related tools (read, write, list, search) and executes the best match for a given task and target path.",
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "What you're trying to do, e.g. 'read a file'"},
-            "path": {"type": "string", "description": "The file or directory path involved, if any"},
-        },
-        "required": ["query"],
-    },
-)
+_cached_tools = None
+_tool_server_map: dict[str, StdioServerParameters] = {}
+_tool_schema_map: dict[str,dict]={}
+_db_conn = get_connection()
+_session_run_id = "live_it_is"
+ALLOWED_DIR = os.getenv("ALLOWED_DIR", "/tmp")
 
-_currently_relevant_tools = []
-_currently_relevant_tools = []
+DOWNSTREAM_SERVERS = [
+    StdioServerParameters(
+        command="npx",
+        args=["-y", "@modelcontextprotocol/server-filesystem", ALLOWED_DIR],
+    ),
+    StdioServerParameters(
+        command="npx",
+        args=["-y", "@modelcontextprotocol/server-memory"],
+    ),
+]
 
-@app.list_tools()
-async def list_tools():
-    if _currently_relevant_tools:
-        print(f"[SERVER] returning narrowed set: {[t.name for t in _currently_relevant_tools]}", file=sys.stderr)
-        return [SEARCH_TOOL] + _currently_relevant_tools
-    print(f"[SERVER] returning only search_tools (no active search yet)", file=sys.stderr)
-    return [SEARCH_TOOL]
 
-@app.call_tool()
-async def call_tool(name, arguments):
-    if name == "search_tools":
-        all_tools = await get_tools()
-        query = arguments["query"]
-        tool_dicts = [{"function": {"name": t.name, "description": t.description}} for t in all_tools]
-        relevant = select_relevant_tools(tool_dicts, query, top_k=1)
-        if not relevant:
-            return [TextContent(type="text", text="No relevant tool found for this request.")]
+def _audit(stage, message, prompt_text, completion_text=""):
+    prompt_tokens = count_tokens(prompt_text)
+    completion_tokens = count_tokens(completion_text) if completion_text else 0
+    insert_audit_log(_db_conn, _session_run_id, stage, prompt_tokens, completion_tokens, message=message)
+    return prompt_tokens, completion_tokens
 
-        best_tool_name = relevant[0]["function"]["name"]
-        print(f"[SERVER] search_tools('{query}') → auto-executing: {best_tool_name}", file=sys.stderr)
 
-        real_args = {k: v for k, v in arguments.items() if k != "query"}
-
-        server_params = StdioServerParameters(command="npx", args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"])
+async def discover_tools_from_server(server_params: StdioServerParameters) -> list:
+    try:
         async with stdio_client(server_params) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
-                result = await session.call_tool(best_tool_name, real_args)
-                return result.content
+                result = await session.list_tools()
+                logger.info(f"Discovered {len(result.tools)} tools from {server_params.args}")
+                return result.tools
+    except Exception as e:
+        logger.error(f"Failed to discover tools from {server_params.args}: {e}")
+        return []
 
-    print(f"[Server] {name} with {arguments}", file=sys.stderr)
-    server_params = StdioServerParameters(command="npx", args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"])
+
+def build_args_schema(schema,query,path):
+    if not schema or "properties" not in schema:
+        return {}
+    
+    props = schema["properties"]
+    required = schema.get("required", [])
+    args = {}
+    for field_name, field_info in props.items():
+        field_type = field_info.get("type", "string")
+        
+        if field_type=="string":
+            if field_name in ("path", "source", "file_path"):
+                args[field_name] = path if path else query
+            elif field_name in ("query", "text", "content","message","input"):
+                args[field_name] = query
+            elif field_name in ("query", "text", "content", "message", "input"):
+                args[field_name] = query
+            elif field_name in ("pattern",):
+                args[field_name] = query
+            elif field_name in required:
+                args[field_name]= query
+                
+        elif field_type == "array":
+            if field_name in required:
+                args[field_name] = [query]
+        
+        elif field_type == "object":
+            if field_name in required:
+                args[field_name] = {}
+    
+    return args
+
+
+
+async def get_tools():
+    global _cached_tools, _tool_server_map, _tool_schema_map
+    if _cached_tools is None:
+        results = await asyncio.gather(
+            *[discover_tools_from_server(s) for s in DOWNSTREAM_SERVERS]
+        )
+        _cached_tools = []
+        _tool_server_map = {}
+        _tool_schema_map = {}
+        for server_params, server_tools in zip(DOWNSTREAM_SERVERS, results):
+            for t in server_tools:
+                _cached_tools.append(t)
+                _tool_server_map[t.name] = server_params
+                _tool_schema_map[t.name] = t.inputSchema or {}
+        
+        tool_dicts = [{"function": {"name": t.name, "description": t.description}} for t in _cached_tools]
+        from core.tool_selection import index_tools
+        index_tools(tool_dicts)
+        logger.info(f"Tools indexed into chroma")
+    return _cached_tools
+
+
+async def _run_downstream_tool(name: str, arguments: dict):
+    server_params = _tool_server_map.get(name)
+    if not server_params:
+        raise ValueError(f"No server found for tool '{name}'")
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            result = await session.call_tool(name, arguments)
-            return result.content
-        
-        
-async def main():
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(
-            read_stream,write_stream,InitializationOptions(
-                server_name="tokennnnn",
-                server_version="0.1",
-                capabilities=app.get_capabilities(
-                    notification_options=NotificationOptions(tools_changed=True),   
-                    experimental_capabilities={},
-            )
-        ))
+            return await session.call_tool(name, arguments)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+
+
+@asynccontextmanager
+async def lifespan(server):
+    logger.info("Starting tool discovery...")
+    await get_tools()
+    logger.info(f"Tool discovery complete, {len(_cached_tools)} tools ready")
+    yield
+
+
+app = FastMCP("token", lifespan=lifespan)
+
+
+@app.tool(description="Use this for ANY task involving local files, folders, or documents on the user's computer.")
+async def find_tool(query: str, path: str = "") -> str:
+    logger.info(f"find_tool called | query: {query}")
+    if not query.strip():
+        return "Error: query is required"
+
+    cached, score = check_cache(query)
+    if cached:
+        _audit("cache_hit", query, query, cached)
+        logger.info(f"CACHE HIT | sim={score:.3f}")
+        return cached
+
+    logger.info(f"CACHE MISS | sim={score:.3f}")
+    tools = await get_tools()
+    tool_dicts = [{"function": {"name": t.name, "description": t.description}} for t in tools]
+    selected = select_relevant_tools(tool_dicts, query, top_k=1)
+
+    if not selected:
+        return "No matching tool found."
+
+    tool_name = selected[0]["function"]["name"]
+    schema = _tool_schema_map.get(tool_name, {})
+    args = build_args_schema(schema, query, path)
+    logger.info(f"selected: {tool_name} | args: {args}")
+
+    try:
+        result = await _run_downstream_tool(tool_name, args)
+        answer = result.content[0].text if result.content else ""
+        answer, original_tokens, final_tokens = trim_text_response(answer)
+        if original_tokens != final_tokens:
+            logger.info(f"[TRIMMED] | {original_tokens} | {final_tokens} tokens | saved {original_tokens - final_tokens}")
+
+        _audit("tool_execution", query, query, answer)
+        if answer:
+            store_answer(query, answer)
+        return answer
+    except Exception as e:
+        logger.error(f"Tool execution failed: {e}")
+        return f"Tool execution failed: {str(e)}"
+
+
+
+@app.tool(description="Index and summarise any PDF or document file from a local file path on the user's computer.")
+async def index_document(file_path: str, doc_id: str) -> str:
+    chunks = index_doc(file_path, doc_id)
+    message = f"Indexed {doc_id} | {chunks} chunks stored."
+    _audit("index_document", doc_id, file_path, message)
+    return message
+
+
+@app.tool(description="Answer questions about any PDF or document file that has been indexed from the user's local computer.")
+async def ask_document(query: str, doc_id: str, top_k: int = 3) -> str:
+    cache_key = f"{doc_id}:{query}"
+    cached, _ = check_cache(cache_key)
+    if cached:
+        _audit("rag_cache_hit", query,cache_key, cached)
+        return cached
+
+    results = search_doc(query, doc_id, top_k)
+    answer = "\n\n".join([f"[Page {r.get('page', '?')}]\n{r['text']}" for r in results])
+    _audit("rag_search", query, query, answer)
+    store_answer(cache_key, answer)
+    return answer
+
+
+@app.tool(description="Search across ALL indexed documents and return the most relevant chunks.")
+async def search_all_documents(query: str, top_k: int = 3) -> str:
     
-# {
-#   "mcpServers": {
-#     "token-optimizer": {
-#       "command": "/Users/prashant/Desktop/fxis/tom/venv/python3",
-#       "args": ["/Users/prashant/Desktop/fxis/tom/adapters/mcp_router/server.py"]
-#     }
-#   }
-# }
+    cache_key = f"all:{query}"
+    cached, score = check_cache(cache_key)
+    if cached:
+        _audit("rag_cache_hit", query, cache_key, cached)
+        return cached
+    
+    results = search_all_doc(query, top_k)
+    if not results:
+        return "No results found across any indexed documents."
+    
+    answer="/n/n".join([
+        f"[Doc: {r.get('doc_id')} |  Page {r.get('page', '?')}]\n{r['text']}"
+        for r in results
+    ])
+    
+    _audit("rag_search_all",query,query,answer)
+    store_answer(cache_key,answer)
+    return answer
+
+
+
+@app.tool(description="Index all PDF files in a folder so they can be searched later.")
+async def index_documents_folder(folder_path: str) -> str:
+    try:
+        results = _index_folder(folder_path)
+        if not results:
+            return f"No PDF files found in {folder_path}"
+        
+        summary = "\n".join([f"  {doc_id}: {chunks} chunks" for doc_id, chunks in results.items()])
+        message = f"Indexed {len(results)} documents from {folder_path}:\n{summary}"
+        _audit("index_folder", folder_path, folder_path, message)
+        return message
+    except Exception as e:
+        return f"Error: {str(e)}"
+    
+    
+@app.prompt(description="Sets up Claude to automatically use the token optimizer tools for documents and file operations.")
+def token_optimizer_prompt() -> str:
+    return """
+        You have access to a token-optimized MCP server with these tools:
+        - find_tool: Use this for ANY task involving files, memory, or data retrieval
+        - index_document: Use this before asking questions about a PDF
+        - ask_document: Use this to query an indexed document
+        - search_all_documents: Use this to search across all indexed documents
+        - index_documents_folder: Use this to index all PDFs in a folder
+
+        Always prefer these tools over answering from memory when the task involves documents or file operations.
+    """
+    
+if __name__ == "__main__":
+    app.run(transport="stdio")
+    
+    
+# List all files in /tmp
+# Show me what's in the /tmp directory
+# Remember this: tom is a token optimization middleware that reduces token usage by semantic caching, dynamic tool selection and RAG
+# What is tom?
+# Index the document at /Users/prashant/Desktop/khaa.pdf with id story1
+# What is the moral of the story in story1?
+
+# use find_tool from token mcp to list files in /tmp
+#       
+# use find_tool from token mcp to list files in /tmp
+
+# use find_tool from token mcp to show contents of /tmp directory
+
+# use token mcp to remember: tom is a token optimization middleware that reduces token usage by semantic caching dynamic tool selection and RAG
+
+# use token mcp to recall what tom is
+
+# use index_document from token mcp to index /Users/prashant/Desktop/khaa.pdf with doc_id story1
+# use ask_document from token mcp to answer: what is the moral of the story in story1
+# use ask_document from token mcp to answer: what is the moral of the story in story1
