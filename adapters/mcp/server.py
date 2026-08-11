@@ -22,7 +22,7 @@ from core.db import get_connection, insert_audit_log
 logging.basicConfig(
     level=logging.INFO,
     handlers=[
-        logging.FileHandler("/Users/prashant/Desktop/fxis/tom/server.log"),
+        logging.FileHandler(os.path.join(project_root, "server.log")),
         logging.StreamHandler(sys.stderr)
     ],
     format="%(asctime)s [%(levelname)s] %(message)s"
@@ -83,8 +83,6 @@ def build_args_schema(schema,query,path):
             if field_name in ("path", "source", "file_path"):
                 args[field_name] = path if path else query
             elif field_name in ("query", "text", "content","message","input"):
-                args[field_name] = query
-            elif field_name in ("query", "text", "content", "message", "input"):
                 args[field_name] = query
             elif field_name in ("pattern",):
                 args[field_name] = query
@@ -225,7 +223,7 @@ async def search_all_documents(query: str, top_k: int = 3) -> str:
     if not results:
         return "No results found across any indexed documents."
     
-    answer="/n/n".join([
+    answer="\n\n".join([
         f"[Doc: {r.get('doc_id')} |  Page {r.get('page', '?')}]\n{r['text']}"
         for r in results
     ])
@@ -266,25 +264,3 @@ def token_optimizer_prompt() -> str:
     
 if __name__ == "__main__":
     app.run(transport="stdio")
-    
-    
-# List all files in /tmp
-# Show me what's in the /tmp directory
-# Remember this: tom is a token optimization middleware that reduces token usage by semantic caching, dynamic tool selection and RAG
-# What is tom?
-# Index the document at /Users/prashant/Desktop/khaa.pdf with id story1
-# What is the moral of the story in story1?
-
-# use find_tool from token mcp to list files in /tmp
-#       
-# use find_tool from token mcp to list files in /tmp
-
-# use find_tool from token mcp to show contents of /tmp directory
-
-# use token mcp to remember: tom is a token optimization middleware that reduces token usage by semantic caching dynamic tool selection and RAG
-
-# use token mcp to recall what tom is
-
-# use index_document from token mcp to index /Users/prashant/Desktop/khaa.pdf with doc_id story1
-# use ask_document from token mcp to answer: what is the moral of the story in story1
-# use ask_document from token mcp to answer: what is the moral of the story in story1

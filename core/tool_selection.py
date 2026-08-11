@@ -1,5 +1,4 @@
 from config import settings,PROJECT_ROOT
-import sys,os
 from core.client import _chroma_client
 from chromadb.utils import embedding_functions
 import os

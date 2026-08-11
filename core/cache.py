@@ -28,7 +28,7 @@ def store_answer(query, answer):
     _cache_collection.add(
         ids=[query_id],
         documents=[query],
-        metadatas=[{'answer':answer}],
+        metadatas=[{'answer': answer, 'cached_at': time.time()}],
     )
 
 def cleanup_cache():
