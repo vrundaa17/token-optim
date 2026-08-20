@@ -18,14 +18,41 @@ _vectorstore = Chroma(collection_name="document",embedding_function=_embeddings,
 _reranker_model = HuggingFaceCrossEncoder(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2")
 _reranker = CrossEncoderReranker(model=_reranker_model, top_n=3)
 
+def list_index_doc():
+    
+    try:
+        result = _vectorstore.get(include=['metadatas'])
+        seen = {}
+        for meta in result['metadatas']:
+            doc_id = meta.get("doc_id")
+            source = meta.get("source", "unknown")
+            if doc_id and doc_id not in seen:
+                seen[doc_id] = source
+        return seen
+    except Exception as e:
+        logger.error(f"[LIST_DOC] empty : {e}")
+        return {}
+
 def index_doc(file_path,doc_id):
+
+    if not file_path or not file_path.strip():
+        raise ValueError("file_path cannot be empty")
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+    if os.path.getsize(file_path) == 0:
+        raise ValueError(f"File is empty: {file_path}")
+    if not doc_id or not doc_id.strip():
+        raise ValueError("doc_id cannot be empty")
+    
     loader = PyMuPDFLoader(file_path)
     pages= loader.load()
     full_chunks=[]
     chunk_index=0
+    
     for page in pages:
         page_number = page.metadata.get("page",0)+1
         chunks = _splitter.split_text(page.page_content)
+        
         for chunk in chunks:
             full_chunks.append(
                 Document(page_content=chunk, 
@@ -34,6 +61,16 @@ def index_doc(file_path,doc_id):
             chunk_index += 1
             
     ids = [f"{doc_id}_{i}" for i in range(len(full_chunks))]
+    
+    try:
+        existing = _vectorstore.get(where ={"doc_id":doc_id})
+        if existing["ids"]:
+            _vectorstore.delete(ids=existing["ids"])
+            logger.info(f"[INDEX] removed {len(existing['ids'])} old chunks - {doc_id}")
+    except Exception as e:
+        logger.warning(f"[INDEX]  could nor clean old chunks for {doc_id} : {e}")
+    
+    
     _vectorstore.add_documents(full_chunks,ids=ids)
     return len(full_chunks)
 

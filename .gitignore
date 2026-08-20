@@ -16,3 +16,4 @@ extenstion/
 .vscode/
 .idea/
 tests/
+adapters/
